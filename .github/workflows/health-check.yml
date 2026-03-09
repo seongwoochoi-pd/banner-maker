@@ -1,0 +1,48 @@
+name: Automated Health Check
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Run Health Check
+        run: |
+          echo "🔍 Running health check..."
+          
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}" \
+            "${{ secrets.SUPABASE_URL }}/functions/v1/make-server-a586c31f/health")
+          
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          
+          echo "HTTP Status: $HTTP_CODE"
+          echo "Response Body:"
+          echo "$BODY" | jq '.' || echo "$BODY"
+          
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "❌ Health check failed with status code: $HTTP_CODE"
+            exit 1
+          fi
+          
+          HAS_ERROR=$(echo "$BODY" | jq -r '.status' | grep -i 'degraded\|error' || true)
+          
+          if [ ! -z "$HAS_ERROR" ]; then
+            echo "⚠️ Health check returned degraded status"
+            echo "Sending Slack notification..."
+            
+            curl -s -X POST \
+              -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}" \
+              -H "Content-Type: application/json" \
+              -d "{\"healthData\": $BODY}" \
+              "${{ secrets.SUPABASE_URL }}/functions/v1/make-server-a586c31f/send-health-alert"
+            
+            echo "📤 Slack notification sent"
+          else
+            echo "✅ All systems operational"
+          fi
