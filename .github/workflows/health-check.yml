@@ -2,7 +2,8 @@ name: Automated Health Check
 
 on:
   schedule:
-    - cron: '*/10 * * * *'
+    # 매시간 정각 실행 (UTC 기준)
+    - cron: '0 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -11,38 +12,81 @@ jobs:
     
     steps:
       - name: Run Health Check
+        id: health_check
         run: |
-          echo "🔍 Running health check..."
+          echo "🏥 서버 헬스체크 시작..."
           
-          RESPONSE=$(curl -s -w "\n%{http_code}" \
+          RESPONSE=$(curl -s -o response.txt -w "%{http_code}" \
             -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}" \
             "${{ secrets.SUPABASE_URL }}/functions/v1/make-server-a586c31f/health")
           
-          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-          BODY=$(echo "$RESPONSE" | sed '$d')
-          
-          echo "HTTP Status: $HTTP_CODE"
+          echo "HTTP Status: $RESPONSE"
           echo "Response Body:"
-          echo "$BODY" | jq '.' || echo "$BODY"
+          cat response.txt
           
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "❌ Health check failed with status code: $HTTP_CODE"
+          if [ "$RESPONSE" -ne 200 ]; then
+            echo "❌ 헬스체크 실패!"
+            echo "status=failed" >> $GITHUB_OUTPUT
             exit 1
-          fi
-          
-          HAS_ERROR=$(echo "$BODY" | jq -r '.status' | grep -i 'degraded\|error' || true)
-          
-          if [ ! -z "$HAS_ERROR" ]; then
-            echo "⚠️ Health check returned degraded status"
-            echo "Sending Slack notification..."
-            
-            curl -s -X POST \
-              -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}" \
-              -H "Content-Type: application/json" \
-              -d "{\"healthData\": $BODY}" \
-              "${{ secrets.SUPABASE_URL }}/functions/v1/make-server-a586c31f/send-health-alert"
-            
-            echo "📤 Slack notification sent"
           else
-            echo "✅ All systems operational"
+            echo "✅ 헬스체크 성공!"
+            echo "status=success" >> $GITHUB_OUTPUT
           fi
+
+      - name: Send Slack Notification on Failure
+        if: failure()
+        run: |
+          curl -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "text": "🚨 *배너 메이커 서버 다운!*",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "🚨 서버 헬스체크 실패",
+                    "emoji": true
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*서비스:*\n배너 메이커"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*시각:*\n'"$(date -u +"%Y-%m-%d %H:%M:%S UTC")"'"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "서버가 응답하지 않습니다. 확인이 필요합니다."
+                  }
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "GitHub Actions 로그 보기"
+                      },
+                      "url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    }
+                  ]
+                }
+              ]
+            }'
+
+      - name: Send Slack Notification on Success (Optional)
+        if: success() && steps.health_check.outputs.status == 'success'
+        run: |
+          # 성공 시에는 알림 안 보냄 (필요하면 주석 해제)
+          echo "✅ 헬스체크 성공 - 알림 생략"
